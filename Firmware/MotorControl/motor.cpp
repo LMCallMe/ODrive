@@ -15,6 +15,12 @@ static constexpr auto CURRENT_ADC_UPPER_BOUND =        (uint32_t)((float)(1 << 1
  * 
  * TODO: this might as well be implemented using the FieldOrientedController.
  */
+/**
+  * @brief 这个控制律调整输出电压，使得一个预定义的
+  * 电流被跟踪。 为此使用了硬编码的积分器增益。
+  *
+  * TODO：这也可以使用 FieldOrientedController 来实现。
+  */
 struct ResistanceMeasurementControlLaw : AlphaBetaFrameController {
     void reset() final {
         test_voltage_ = 0.0f;
@@ -74,7 +80,7 @@ struct ResistanceMeasurementControlLaw : AlphaBetaFrameController {
     float actual_current_ = 0.0f;
     float target_current_ = 0.0f;
     float test_voltage_ = 0.0f;
-    float I_beta_ = 0.0f; // [A] low pass filtered Ibeta response
+    float I_beta_ = 0.0f; // [A] low pass filtered Ibeta response 低通滤波 Ibeta 响应
     std::optional<float> test_mod_ = NAN;
 };
 
@@ -85,6 +91,12 @@ struct ResistanceMeasurementControlLaw : AlphaBetaFrameController {
  * 
  * TODO: this method assumes a certain synchronization between current measurement and output application
  */
+/**
+  * @brief 这个控制律在正负输出之间快速切换电压。 
+  * 通过测量电流纹波有多大，可以确定相电感。
+  * 
+  * TODO：此方法假定电流测量和输出应用之间有一定的同步
+  */
 struct InductanceMeasurementControlLaw : AlphaBetaFrameController {
     void reset() final {
         attached_ = false;
@@ -129,6 +141,8 @@ struct InductanceMeasurementControlLaw : AlphaBetaFrameController {
     float get_inductance() {
         // Note: A more correct formula would also take into account that there is a finite timestep.
         // However, the discretisation in the current control loop inverts the same discrepancy
+        // 注意：更正确的公式也会考虑到时间步长是有限的。
+        // 然而，当前控制回路中的离散化反转了相同的差异
         float dt = (float)(last_input_timestamp_ - start_timestamp_) / (float)TIM_1_8_CLOCK_HZ; // at 216MHz this overflows after 19 seconds
         return std::abs(test_voltage_) / (deltaI_ / dt);
     }
@@ -192,6 +206,25 @@ Motor::Motor(TIM_HandleTypeDef* timer,
  *        timer update event.
  * @returns: True on success, false otherwise
  */
+/**
+ * @brief Arms 属于该电机的 PWM 输出。
+ *
+ * 请注意，这不会立即激活 PWM 输出，它只是设置一个标志，以便稍后启用它们。
+ *
+ * 顺序是这样的：
+ * - Motor::arm() 设置 is_armed_ 标志。
+ * - 在下一个定时器更新事件 Motor::timer_update_cb() 在中断上下文中被调用
+ * - Motor::timer_update_cb() 运行指定的控制律以确定 PWM 值
+ * - Motor::timer_update_cb() 调用 Motor::apply_pwm_timings()
+ * - Motor::apply_pwm_timings() 设置输出比较寄存器和 AOE（自动输出启用）位。
+ * - 在下一次更新事件时，定时器将配置的值锁存到活动影子寄存器中并同时启用输出。
+ * 
+ * 可以通过调用 Motor::disarm() 随时中止序列。
+ *
+ * @param control_law: 以电流频率调用的控制律测量。函数必须尽快返回,
+ * 这样产生的 PWM 时序在下一个之前可用定时器更新事件。
+ * @returns: 成功时为真，否则为假
+ */
 bool Motor::arm(PhaseControlLaw<3>* control_law) {
     axis_->mechanical_brake_.release();
 
@@ -225,6 +258,13 @@ bool Motor::arm(PhaseControlLaw<3>* control_law) {
  * 
  * @param tentative: If true, the update is not counted as "refresh".
  */
+/**
+  * @brief 更新相位 PWM 时序，除非电机已解除。
+  *
+  * 如果电机已启用，PWM 时序会在下一次更新事件时生效（如果尚未启用，则启用），
+  * 除非电机在此之前已停用。
+  * @param 暂定：如果为真，则更新不计为“刷新”。
+  */ 
 void Motor::apply_pwm_timings(uint16_t timings[3], bool tentative) {
     CRITICAL_SECTION() {
         if (odrv.config_.enable_brake_resistor && !brake_resistor_armed) {
@@ -241,6 +281,7 @@ void Motor::apply_pwm_timings(uint16_t timings[3], bool tentative) {
             if (is_armed_) {
                 // Set the Automatic Output Enable so that the Master Output Enable
                 // bit will be automatically enabled on the next update event.
+                // 设置自动输出启用，以便在下一次更新事件时自动启用主输出启用位。
                 tim->BDTR |= TIM_BDTR_AOE;
             }
         }
@@ -250,6 +291,9 @@ void Motor::apply_pwm_timings(uint16_t timings[3], bool tentative) {
         // so we must disarm the motor.
         // (this also protects against the case where the update interrupt has too
         // low priority, but that should not happen)
+        // 如果在我们更新 btimings 时刚刚发生了计时器更新事件，
+        // 我们无法确定影子寄存器现在包含哪些值，因此我们必须解除电机。
+        // （这也可以防止更新中断发生的情况 优先级太低，但这不应该发生）
         //if (__HAL_TIM_GET_FLAG(htim, TIM_FLAG_UPDATE)) {
         //    disarm_with_error(ERROR_CONTROL_DEADLINE_MISSED);
         //}
@@ -263,6 +307,11 @@ void Motor::apply_pwm_timings(uint16_t timings[3], bool tentative) {
  * motor phases are floating and will not be enabled again until
  * arm() is called.
  */
+/**
+ * @brief 电机 PWM 去使能
+ * 此函数返回后，保证所有三个电机相位都处于浮动状态，
+ * 并且在调用 arm() 之前不会再次启用。
+ */
 bool Motor::disarm(bool* p_was_armed) {
     bool was_armed;
     
@@ -275,11 +324,13 @@ bool Motor::disarm(bool* p_was_armed) {
         armed_state_ = 0;
         TIM_HandleTypeDef* timer = timer_;
         timer->Instance->BDTR &= ~TIM_BDTR_AOE; // prevent the PWMs from automatically enabling at the next update
+                                                // 防止 PWM 在下次更新时自动启用
         __HAL_TIM_MOE_DISABLE_UNCONDITIONALLY(timer);
         control_law_ = nullptr;
     }
 
     // Check necessary to prevent infinite recursion
+    // 必要的检查以防止无限递归
     if (was_armed) {
         update_brake_current();
     }
@@ -294,6 +345,8 @@ bool Motor::disarm(bool* p_was_armed) {
 // @brief Tune the current controller based on phase resistance and inductance
 // This should be invoked whenever one of these values changes.
 // TODO: allow update on user-request or update automatically via hooks
+// @brief 根据相电阻和电感调整电流控制器。只要这些值之一发生变化，就应该调用它。
+// TODO: 允许更新用户请求或通过钩子自动更新 
 void Motor::update_current_controller_gains() {
     // Calculate current control gains
     float p_gain = config_.current_control_bandwidth * config_.phase_inductance;
@@ -309,12 +362,14 @@ bool Motor::apply_config() {
 }
 
 // @brief Set up the gate drivers
+// @brief 设置栅极驱动器
 bool Motor::setup() {
     fet_thermistor_.update();
     motor_thermistor_.update();
 
     // Solve for exact gain, then snap down to have equal or larger range as requested
     // or largest possible range otherwise
+    // 求解精确的增益，然后按要求缩小到具有相等或更大的范围或否则可能的最大范围
     constexpr float kMargin = 0.90f;
     constexpr float max_output_swing = 1.35f; // [V] out of amplifier
     float max_unity_gain_current = kMargin * max_output_swing * shunt_conductance_; // [A]
@@ -325,8 +380,10 @@ bool Motor::setup() {
         return false;
 
     // Values for current controller
+    // 当前控制器的值
     phase_current_rev_gain_ = 1.0f / actual_gain;
     // Clip all current control to actual usable range
+    // 将所有当前控件剪辑到实际可用范围
     max_allowed_current_ = max_unity_gain_current * phase_current_rev_gain_;
 
     max_dc_calib_ = 0.1f * max_allowed_current_;
@@ -372,6 +429,7 @@ float Motor::effective_current_lim() {
     }
 
     // Apply thermistor current limiters
+    // 应用热敏电阻限流器
     current_lim = std::min(current_lim, motor_thermistor_.get_current_limit(config_.current_lim));
     current_lim = std::min(current_lim, fet_thermistor_.get_current_limit(config_.current_lim));
     effective_current_lim_ = current_lim;
@@ -381,6 +439,8 @@ float Motor::effective_current_lim() {
 
 //return the maximum available torque for the motor.
 //Note - for ACIM motors, available torque is allowed to be 0.
+//返回电机的最大可用扭矩。
+//注意 - 对于 ACIM 电机，允许可用扭矩为 0。
 float Motor::max_available_torque() {
     if (config_.motor_type == Motor::MOTOR_TYPE_ACIM) {
         float max_torque = effective_current_lim_ * config_.torque_constant * axis_->acim_estimator_.rotor_flux_;
@@ -395,6 +455,7 @@ float Motor::max_available_torque() {
 
 std::optional<float> Motor::phase_current_from_adcval(uint32_t ADCValue) {
     // Make sure the measurements don't come too close to the current sensor's hardware limitations
+    // 确保测量值不会太接近当前传感器的硬件限制
     if (ADCValue < CURRENT_ADC_LOWER_BOUND || ADCValue > CURRENT_ADC_UPPER_BOUND) {
         error_ |= ERROR_CURRENT_SENSE_SATURATION;
         return std::nullopt;
@@ -412,6 +473,7 @@ std::optional<float> Motor::phase_current_from_adcval(uint32_t ADCValue) {
 //--------------------------------
 
 // TODO check Ibeta balance to verify good motor connection
+// TODO 检查 Ibeta 平衡以验证电机连接良好
 bool Motor::measure_phase_resistance(float test_current, float max_voltage) {
     ResistanceMeasurementControlLaw control_law;
     control_law.target_current_ = test_current;
@@ -439,6 +501,8 @@ bool Motor::measure_phase_resistance(float test_current, float max_voltage) {
         // TODO: the motor is already disarmed at this stage. This is an error
         // that only pretains to the measurement and its result so it should
         // just be a return value of this function.
+        // TODO：电机在此阶段已被解除。 
+        // 这是一个仅适用于测量及其结果的错误，因此它应该只是此函数的返回值。
         disarm_with_error(ERROR_PHASE_RESISTANCE_OUT_OF_RANGE);
         success = false;
     }
@@ -477,6 +541,7 @@ bool Motor::measure_phase_inductance(float test_voltage) {
     config_.phase_inductance = control_law.get_inductance();
     
     // TODO arbitrary values set for now
+    // TODO 为现在设置的任意值
     if (!(config_.phase_inductance >= 2e-6f && config_.phase_inductance <= 4000e-6f)) {
         error_ |= ERROR_PHASE_INDUCTANCE_OUT_OF_RANGE;
         success = false;
@@ -489,6 +554,8 @@ bool Motor::measure_phase_inductance(float test_voltage) {
 // TODO: motor calibration should only be a utility function that's called from
 // the UI on explicit user request. It should take its parameters as input
 // arguments and return the measured results without modifying any config values.
+// TODO：电机校准应该只是一个在用户明确请求时从 UI 调用的实用函数。 
+// 它应该将其参数作为输入参数，并在不修改任何配置值的情况下返回测量结果。
 bool Motor::run_calibration() {
     float R_calib_max_voltage = config_.resistance_calib_max_voltage;
     if (config_.motor_type == MOTOR_TYPE_HIGH_CURRENT
@@ -511,6 +578,7 @@ bool Motor::run_calibration() {
 
 void Motor::update(uint32_t timestamp) {
     // Load torque setpoint, convert to motor direction
+    // 负载转矩设定值，转换为电机方向
     std::optional<float> maybe_torque = torque_setpoint_src_.present();
     if (!maybe_torque.has_value()) {
         error_ |= ERROR_UNKNOWN_TORQUE;
@@ -519,22 +587,27 @@ void Motor::update(uint32_t timestamp) {
     float torque = direction_ * *maybe_torque;
 
     // Load setpoints from previous iteration.
+    // 从前一次迭代加载设定点。
     auto [id, iq] = Idq_setpoint_.previous()
                      .value_or(float2D{0.0f, 0.0f});
     // Load effective current limit
+    // 负载有效电流限制
     float ilim = axis_->motor_.effective_current_lim_;
 
     // Autoflux tracks old Iq (that may be 2-norm clamped last cycle) to make sure we are chasing a feasable current.
+    // Autoflux 跟踪旧的 Iq（可能是最后一个周期的 2 范数钳位）以确保我们正在追逐可行的电流。
     if ((axis_->motor_.config_.motor_type == Motor::MOTOR_TYPE_ACIM) && config_.acim_autoflux_enable) {
         float abs_iq = std::abs(iq);
         float gain = abs_iq > id ? config_.acim_autoflux_attack_gain : config_.acim_autoflux_decay_gain;
         id += gain * (abs_iq - id) * current_meas_period;
-        id = std::clamp(id, config_.acim_autoflux_min_Id, 0.9f * ilim); // 10% space reserved for Iq
+        id = std::clamp(id, config_.acim_autoflux_min_Id, 0.9f * ilim); // 10% space reserved for Iq 为 Iq 保留 10% 的空间
     } else {
         id = std::clamp(id, -ilim*0.99f, ilim*0.99f); // 1% space reserved for Iq to avoid numerical issues
+                                                      // 为 Iq 保留 1% 的空间以避免数字问题
     }
 
     // Convert requested torque to current
+    // 将请求的扭矩转换为电流
     if (axis_->motor_.config_.motor_type == Motor::MOTOR_TYPE_ACIM) {
         iq = torque / (axis_->motor_.config_.torque_constant * std::max(axis_->acim_estimator_.rotor_flux_, config_.acim_gain_min_flux));
     } else {
@@ -542,6 +615,7 @@ void Motor::update(uint32_t timestamp) {
     }
 
     // 2-norm clamping where Id takes priority
+    // 2 范数限制，其中 Id 优先
     float iq_lim_sqr = SQ(ilim) - SQ(id);
     float Iq_lim = (iq_lim_sqr <= 0.0f) ? 0.0f : sqrt(iq_lim_sqr);
     iq = std::clamp(iq, -Iq_lim, Iq_lim);
@@ -555,6 +629,8 @@ void Motor::update(uint32_t timestamp) {
     // in this function.
     // A cleaner fix would be to take the feedforward calculation out of here
     // and turn it into a separate component.
+    // 这个更新调用有点奇怪，因为它取决于 Id,q 设置点，但输出我们稍后在这个函数中依赖的相速度。
+    // 一个更简洁的解决方法是将前馈计算从这里去掉，并将其变成一个单独的组件。
     MEASURE_TIME(axis_->task_times_.acim_estimator_update)
         axis_->acim_estimator_.update(timestamp);
 
@@ -586,6 +662,7 @@ void Motor::update(uint32_t timestamp) {
     
     if (axis_->motor_.config_.motor_type == Motor::MOTOR_TYPE_GIMBAL) {
         // reinterpret current as voltage
+        // 将电流重新解释为电压
         Vdq_setpoint_ = {vd + id, vq + iq};
     } else {
         Vdq_setpoint_ = {vd, vq};
@@ -596,8 +673,12 @@ void Motor::update(uint32_t timestamp) {
 /**
  * @brief Called when the underlying hardware timer triggers an update event.
  */
+/**
+  * @brief 当底层硬件定时器触发更新事件时调用。
+  */
 void Motor::current_meas_cb(uint32_t timestamp, std::optional<Iph_ABC_t> current) {
     // TODO: this is platform specific
+    // TODO：这是特定于平台的
     //const float current_meas_period = static_cast<float>(2 * TIM_1_8_PERIOD_CLOCKS * (TIM_1_8_RCR + 1)) / TIM_1_8_CLOCK_HZ;
     TaskTimerContext tmr{axis_->task_times_.current_sense};
 
@@ -625,10 +706,13 @@ void Motor::current_meas_cb(uint32_t timestamp, std::optional<Iph_ABC_t> current
     // The motor might be disarmed in this function. In this case the
     // handler will continue to run until the end but it won't have an
     // effect on the PWM.
+    // 运行系统级检查（例如过压/欠压情况）。电机可能会在此功能中解除。 
+    // 在这种情况下，处理程序将继续运行直到结束，但不会对 PWM 产生影响。
     odrv.do_fast_checks();
 
     if (current_meas_.has_value()) {
         // Check for violation of current limit
+        // 检查是否违反了电流限制
         // If Ia + Ib + Ic == 0 holds then we have:
         // Inorm^2 = Id^2 + Iq^2 = Ialpha^2 + Ibeta^2 = 2/3 * (Ia^2 + Ib^2 + Ic^2)
         float Itrip = effective_current_lim_ + config_.current_lim_margin;
@@ -638,6 +722,7 @@ void Motor::current_meas_cb(uint32_t timestamp, std::optional<Iph_ABC_t> current
 
         // Hack: we disable the current check during motor calibration because
         // it tends to briefly overshoot when the motor moves to align flux with I_alpha
+        // Hack：我们在电机校准期间禁用电流检查，因为当电机移动以将通量与 I_alpha 对齐时，它往往会短暂过冲
         if (Inorm_sq > SQ(Itrip)) {
             disarm_with_error(ERROR_CURRENT_LIMIT_VIOLATION);
         }
@@ -645,6 +730,8 @@ void Motor::current_meas_cb(uint32_t timestamp, std::optional<Iph_ABC_t> current
         // Since we can't check current limits, be safe for now and disarm.
         // Theoretically we could continue to operate if there is no active
         // current limit.
+        // 由于我们无法检查电流限制，现在请注意安全并解除武装。
+        // 理论上，如果没有有效电流限制，我们可以继续操作。
         disarm_with_error(ERROR_UNKNOWN_CURRENT_MEASUREMENT);
     }
 
@@ -663,6 +750,9 @@ void Motor::current_meas_cb(uint32_t timestamp, std::optional<Iph_ABC_t> current
 /**
  * @brief Called when the underlying hardware timer triggers an update event.
  */
+/**
+  * @brief 当底层硬件定时器触发更新事件时调用。
+  */
 void Motor::dc_calib_cb(uint32_t timestamp, std::optional<Iph_ABC_t> current) {
     const float dc_calib_period = static_cast<float>(2 * TIM_1_8_PERIOD_CLOCKS * (TIM_1_8_RCR + 1)) / TIM_1_8_CLOCK_HZ;
     TaskTimerContext tmr{axis_->task_times_.dc_calib};
@@ -696,6 +786,7 @@ void Motor::pwm_update_cb(uint32_t output_timestamp) {
     }
 
     // Apply control law to calculate PWM duty cycles
+    // 应用控制律来计算 PWM 占空比
     if (is_armed_ && control_law_status == ERROR_NONE) {
         uint16_t next_timings[] = {
             (uint16_t)(pwm_timings[0] * (float)TIM_1_8_PERIOD_CLOCKS),
@@ -707,6 +798,7 @@ void Motor::pwm_update_cb(uint32_t output_timestamp) {
         if (!(timer_->Instance->BDTR & TIM_BDTR_MOE) && (control_law_status == ERROR_CONTROLLER_INITIALIZING)) {
             // If the PWM output is armed in software but not yet in
             // hardware we tolerate the "initializing" error.
+            // 如果 PWM 输出在软件中武装但尚未在硬件中，我们可以容忍“初始化”错误。
             i_bus = 0.0f;
         } else {
             disarm_with_error(control_law_status);
@@ -715,9 +807,11 @@ void Motor::pwm_update_cb(uint32_t output_timestamp) {
 
     if (!is_armed_) {
         // If something above failed, reset I_bus to 0A.
+        // 如果上述操作失败，则将 I_bus 重置为 0A。
         i_bus = 0.0f;
     } else if (is_armed_ && !i_bus.has_value()) {
         // If the motor is armed then i_bus must be known
+        // 如果电机已启动，则必须知道 i_bus
         disarm_with_error(ERROR_UNKNOWN_CURRENT_MEASUREMENT);
         i_bus = 0.0f;
     }

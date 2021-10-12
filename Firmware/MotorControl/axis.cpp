@@ -102,18 +102,22 @@ void Axis::start_thread() {
 
 /**
  * @brief Blocks until at least one complete control loop has been executed.
+ * 阻塞直到至少执行了一个完整的控制循环。
  */
 bool Axis::wait_for_control_iteration() {
-    osSignalWait(0x0001, osWaitForever); // this might return instantly
+    osSignalWait(0x0001, osWaitForever); // this might return instantly 
+                                         // 这可能会立即返回
     osSignalWait(0x0001, osWaitForever); // this might be triggered at the
                                          // end of a control loop iteration
                                          // which was started before we entered
                                          // this function
+                                         // 这可能会在我们进入此函数之前开始的控制循环迭代结束时触发
     osSignalWait(0x0001, osWaitForever);
     return true;
 }
 
-// step/direction interface
+// step/direction interface 
+// 步进/方向接口
 void Axis::step_cb() {
     if (step_dir_active_) {
         dir_gpio_.read() ? ++steps_ : --steps_;
@@ -130,6 +134,7 @@ void Axis::decode_step_dir_pins() {
 void Axis::set_step_dir_active(bool active) {
     if (active) {
         // Subscribe to rising edges of the step GPIO
+        // 订阅步进GPIO的上升沿
         if (!step_gpio_.subscribe(true, false, step_cb_wrapper, this)) {
             odrv.misconfigured_ = true;
         }
@@ -141,18 +146,24 @@ void Axis::set_step_dir_active(bool active) {
         // Unsubscribe from step GPIO
         // TODO: if we change the GPIO while the subscription is active and then
         // unsubscribe then the unsubscribe is for the wrong pin.
+        // 取消订阅步骤 GPIO
+        // TODO：如果我们在订阅处于活动状态时更改 GPIO 然后取消订阅，则取消订阅是针对错误的引脚。
         step_gpio_.unsubscribe();
     }
 }
 
 // @brief Do axis level checks and call subcomponent do_checks
 // Returns true if everything is ok.
+// @brief 做轴级检查并调用子组件 do_checks
+// 如果一切正常，则返回 true。
 bool Axis::do_checks(uint32_t timestamp) {
     // Sub-components should use set_error which will propegate to this error_
+    // 子组件应该使用 set_error 它将传播到这个 error_
     motor_.effective_current_lim();
     motor_.do_checks(timestamp);
 
     // Check for endstop presses
+    // 检查是否按下了限位器
     if (min_endstop_.config_.enabled && min_endstop_.rose() && !(current_state_ == AXIS_STATE_HOMING)) {
         error_ |= ERROR_MIN_ENDSTOP_PRESSED;
     } else if (max_endstop_.config_.enabled && max_endstop_.rose() && !(current_state_ == AXIS_STATE_HOMING)) {
@@ -222,6 +233,7 @@ bool Axis::run_lockin_spin(const LockinConfig_t &lockin_config, bool remain_arme
         bool reached_target_dist = open_loop_controller_.total_distance_.any().value_or(0.0f) * dir >= lockin_config.finish_distance * dir;
 
         // Check if terminal condition is reached
+        // 检查是否达到终止条件
         bool terminal_condition = (reached_target_vel && lockin_config.finish_on_vel)
                                || (reached_target_dist && lockin_config.finish_on_distance)
                                || (encoder_.index_found_ && lockin_config.finish_on_enc_idx);
@@ -232,6 +244,7 @@ bool Axis::run_lockin_spin(const LockinConfig_t &lockin_config, bool remain_arme
 
         // Activate index pin as soon as target velocity was reached. This is
         // to avoid hitting the index from the wrong direction.
+        // 达到目标速度后立即激活索引销。 这是为了避免从错误的方向击中索引。
         if (reached_target_vel && !encoder_.index_found_ && !subscribed_to_idx_once) {
             encoder_.set_idx_subscribe(true);
             subscribed_to_idx_once = true;
@@ -242,6 +255,7 @@ bool Axis::run_lockin_spin(const LockinConfig_t &lockin_config, bool remain_arme
                 break;
 
         // TODO: use new sync function instead
+        // TODO: 改用新的同步函数
         asm volatile ("" ::: "memory");
         osDelay(1);
     }
@@ -259,12 +273,14 @@ bool Axis::start_closed_loop_control() {
 
     if (sensorless_mode) {
         // TODO: restart if desired
+        // TODO: 如果需要重启
         if (!run_lockin_spin(config_.sensorless_ramp, true)) {
             return false;
         }
     }
 
     // Hook up the data paths between the components
+    // 连接组件之间的数据路径
     CRITICAL_SECTION() {
         if (sensorless_mode) {
             controller_.pos_estimate_linear_src_.disconnect();
@@ -287,6 +303,7 @@ bool Axis::start_closed_loop_control() {
         }
 
         // To avoid any transient on startup, we intialize the setpoint to be the current position
+        // 为了避免启动时的任何瞬态，我们将设定点初始化为当前位置
         if (controller_.config_.control_mode >= Controller::CONTROL_MODE_POSITION_CONTROL) {
             std::optional<float> pos_init = (controller_.config_.circular_setpoints ?
                                     controller_.pos_estimate_circular_src_ :
@@ -303,6 +320,7 @@ bool Axis::start_closed_loop_control() {
         controller_.input_pos_updated();
 
         // Avoid integrator windup issues
+        // 避免积分器饱和问题
         controller_.vel_integrator_torque_ = 0.0f;
 
         motor_.torque_setpoint_src_.connect_to(&controller_.torque_output_);
@@ -328,6 +346,7 @@ bool Axis::start_closed_loop_control() {
         if (sensorless_mode) {
             // Make the final velocity of the loĉk-in spin the setpoint of the
             // closed loop controller to allow for smooth transition.
+            // 使 loĉk-in 自旋的最终速度成为闭环控制器的设定点，以实现平滑过渡。
             float vel = config_.sensorless_ramp.vel / (2.0f * M_PI * motor_.config_.pole_pairs);
             controller_.input_vel_ = vel;
             controller_.vel_setpoint_ = vel;
@@ -335,6 +354,7 @@ bool Axis::start_closed_loop_control() {
     }
 
     // In sensorless mode the motor is already armed.
+    // 在无传感器模式下，电机已经准备就绪。
     if (!motor_.is_armed_) {
         wait_for_control_iteration();
         motor_.arm(&motor_.current_control_);
@@ -365,12 +385,15 @@ bool Axis::run_closed_loop_control_loop() {
 
 // Slowly drive in the negative direction at homing_speed until the min endstop is pressed
 // When pressed, set the linear count to the offset (default 0), and then go to position 0
+// 以 homing_speed 缓慢向负方向行驶，直到按下最小限位器
+// 按下时，将线性计数设置为偏移量（默认为 0），然后转到位置 0
 bool Axis::run_homing() {
     Controller::ControlMode stored_control_mode = controller_.config_.control_mode;
     Controller::InputMode stored_input_mode = controller_.config_.input_mode;
 
     // TODO: theoretically this check should be inside the update loop,
     // otherwise someone could disable the endstop while homing is in progress.
+    // TODO：理论上这个检查应该在更新循环内，否则有人可以在归位过程中禁用限位器。
     if (!min_endstop_.config_.enabled) {
         return error_ |= ERROR_HOMING_WITHOUT_ENDSTOP, false;
     }
@@ -392,6 +415,7 @@ bool Axis::run_homing() {
     start_closed_loop_control();
 
     // Driving toward the endstop
+    // 驶向 endstop
     while ((requested_state_ == AXIS_STATE_UNDEFINED) && motor_.is_armed_ && !(done = min_endstop_.get_state())) {
         osDelay(1);
     }
@@ -405,6 +429,7 @@ bool Axis::run_homing() {
     }
 
     error_ &= ~ERROR_MIN_ENDSTOP_PRESSED; // clear this error since we deliberately drove into the endstop
+                                          // 清除此错误，因为我们故意驶入 endstop
 
     std::optional<float> pos_estimate_local = encoder_.pos_estimate_.any();
     if (pos_estimate_local == std::nullopt || !pos_estimate_local.has_value()){
@@ -415,6 +440,7 @@ bool Axis::run_homing() {
     controller_.config_.input_mode = Controller::INPUT_MODE_TRAP_TRAJ;
 
     // Initialize closed loop control, and then set the desired location.
+    // 初始化闭环控制，然后设置所需位置。
     start_closed_loop_control();
     
     controller_.input_pos_ = pos_estimate_local.value() + min_endstop_.config_.offset;
@@ -456,9 +482,11 @@ bool Axis::run_idle_loop() {
 }
 
 // Infinite loop that does calibration and enters main control loop as appropriate
+// 无限循环，进行校准并酌情进入主控制循环
 void Axis::run_state_machine_loop() {
     for (;;) {
         // Load the task chain if a specific request is pending
+        // 如果特定请求未决，则加载任务链
         if (requested_state_ != AXIS_STATE_UNDEFINED) {
             size_t pos = 0;
             if (requested_state_ == AXIS_STATE_STARTUP_SEQUENCE) {
@@ -488,19 +516,25 @@ void Axis::run_state_machine_loop() {
             task_chain_[pos++] = AXIS_STATE_UNDEFINED;  // TODO: bounds checking
             requested_state_ = AXIS_STATE_UNDEFINED;
             // Auto-clear any invalid state error
+            // 自动清除任何无效状态错误
             error_ &= ~ERROR_INVALID_STATE;
         }
 
         // Note that current_state is a reference to task_chain_[0]
+        // 注意 current_state 是对 task_chain_[0] 的引用
 
         // Run the specified state
         // Handlers should exit if requested_state != AXIS_STATE_UNDEFINED
+        // 运行指定状态
+        // 如果 requested_state != AXIS_STATE_UNDEFINED，处理程序应该退出
         bool status;
         switch (current_state_) {
             case AXIS_STATE_MOTOR_CALIBRATION: {
                 // These error checks are a hacky way to force legacy behavior
                 // when an error is raised. TODO: remove this when we overhaul
                 // the error architecture
+                // 这些错误检查是在引发错误时强制遗留行为的一种hacky 方式。
+                // TODO：当我们检修错误架构时删除它
                 // (https://github.com/madcowswe/ODrive/issues/526).
                 //if (odrv.any_error())
                 //    goto invalid_state_label;

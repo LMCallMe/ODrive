@@ -10,6 +10,7 @@ bool Controller::apply_config() {
 
 void Controller::reset() {
     // pos_setpoint is initialized in start_closed_loop_control
+    // pos_setpoint 在 start_closed_loop_control 中初始化
     vel_setpoint_ = 0.0f;
     vel_integrator_torque_ = 0.0f;
     torque_setpoint_ = 0.0f;
@@ -48,6 +49,7 @@ void Controller::move_incremental(float displacement, bool from_input_pos = true
 
 void Controller::start_anticogging_calibration() {
     // Ensure the cogging map was correctly allocated earlier and that the motor is capable of calibrating
+    // 确保之前正确分配了齿槽映射并且电机能够校准
     if (axis_->error_ == Axis::ERROR_NONE) {
         config_.anticogging.calib_anticogging = true;
     }
@@ -61,6 +63,11 @@ void Controller::start_anticogging_calibration() {
  * 
  * This holding current is added as a feedforward term in the control loop.
  */
+/*
+  * 这种反齿槽实现迭代每个编码器位置，等待零速度和位置误差，
+  * 然后采样保持该位置所需的电流。
+  * 该保持电流被添加为控制回路中的前馈项。
+  */
 bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate) {
     float pos_err = input_pos_ - pos_estimate;
     if (std::abs(pos_err) <= config_.anticogging.calib_pos_threshold / (float)axis_->encoder_.config_.cpr &&
@@ -89,8 +96,8 @@ bool Controller::anticogging_calibration(float pos_estimate, float vel_estimate)
 
 void Controller::update_filter_gains() {
     float bandwidth = std::min(config_.input_filter_bandwidth, 0.25f * current_meas_hz);
-    input_filter_ki_ = 2.0f * bandwidth;  // basic conversion to discrete time
-    input_filter_kp_ = 0.25f * (input_filter_ki_ * input_filter_ki_); // Critically damped
+    input_filter_ki_ = 2.0f * bandwidth;  // basic conversion to discrete time 到离散时间的基本转换
+    input_filter_kp_ = 0.25f * (input_filter_ki_ * input_filter_ki_); // Critically damped 临界阻尼
 }
 
 static float limitVel(const float vel_limit, const float vel_estimate, const float vel_gain, const float torque) {
@@ -126,6 +133,7 @@ bool Controller::update() {
     }
 
     // TODO also enable circular deltas for 2nd order filter, etc.
+    // TODO 也为二阶滤波器等启用循环增量。
     if (config_.circular_setpoints) {
         if (!pos_wrap.has_value()) {
             set_error(ERROR_INVALID_CIRCULAR_RANGE);
@@ -161,6 +169,7 @@ bool Controller::update() {
         } break;
         case INPUT_MODE_POS_FILTER: {
             // 2nd order pos tracking filter
+            // 二阶位置跟踪过滤器
             float delta_pos = input_pos_ - pos_setpoint_; // Pos error
             if (config_.circular_setpoints) {
                 if (!pos_wrap.has_value()) {
@@ -203,11 +212,13 @@ bool Controller::update() {
                 input_pos_updated_ = false;
             }
             // Avoid updating uninitialized trajectory
+            // 避免更新未初始化的轨迹
             if (trajectory_done_)
                 break;
             
             if (axis_->trap_traj_.t_ > axis_->trap_traj_.Tf_) {
                 // Drop into position control mode when done to avoid problems on loop counter delta overflow
+                // 完成后进入位置控制模式以避免循环计数器增量溢出问题 
                 config_.control_mode = CONTROL_MODE_POSITION_CONTROL;
                 pos_setpoint_ = input_pos_;
                 vel_setpoint_ = 0.0f;
@@ -220,7 +231,9 @@ bool Controller::update() {
                 torque_setpoint_ = traj_step.Ydd * config_.inertia;
                 axis_->trap_traj_.t_ += current_meas_period;
             }
-            anticogging_pos_estimate = pos_setpoint_; // FF the position setpoint instead of the pos_estimate
+            // FF the position setpoint instead of the pos_estimate 
+            // FF 位置设定值而不是 pos_estimate
+            anticogging_pos_estimate = pos_setpoint_; 
         } break;
         case INPUT_MODE_TUNING: {
             autotuning_phase_ = wrap_pm_pi(autotuning_phase_ + (2.0f * M_PI * autotuning_.frequency * current_meas_period));
@@ -239,6 +252,7 @@ bool Controller::update() {
 
     // Position control
     // TODO Decide if we want to use encoder or pll position here
+    // TODO 决定我们是否要在这里使用编码器或 pll 位置
     float gain_scheduling_multiplier = 1.0f;
     float vel_des = vel_setpoint_;
     if (config_.control_mode >= CONTROL_MODE_POSITION_CONTROL) {
@@ -250,8 +264,10 @@ bool Controller::update() {
                 return false;
             }
             // Keep pos setpoint from drifting
+            // 防止 pos 设定点漂移
             pos_setpoint_ = fmodf_pos(pos_setpoint_, *pos_wrap);
             // Circular delta
+            // 圆形增量
             pos_err = pos_setpoint_ - *pos_estimate_circular;
             pos_err = wrap_pm(pos_err, *pos_wrap);
         } else {
@@ -264,6 +280,7 @@ bool Controller::update() {
 
         vel_des += config_.pos_gain * pos_err;
         // V-shaped gain shedule based on position error
+        // 基于位置误差的 V 形增益曲线
         float abs_pos_err = std::abs(pos_err);
         if (config_.enable_gain_scheduling && abs_pos_err <= config_.gain_scheduling_width) {
             gain_scheduling_multiplier = abs_pos_err / config_.gain_scheduling_width;
@@ -277,6 +294,7 @@ bool Controller::update() {
     }
 
     // Check for overspeed fault (done in this module (controller) for cohesion with vel_lim)
+    // 检查超速故障（在此模块（控制器）中完成以与 vel_lim 内聚）
     if (config_.enable_overspeed_error) {  // 0.0f to disable
         if (!vel_estimate.has_value()) {
             set_error(ERROR_INVALID_ESTIMATE);
@@ -289,7 +307,9 @@ bool Controller::update() {
     }
 
     // TODO: Change to controller working in torque units
+    // TODO：更改为以扭矩单位工作的控制器
     // Torque per amp gain scheduling (ACIM)
+    // 每安培转矩增益调度（ACIM） 
     float vel_gain = config_.vel_gain;
     float vel_integrator_gain = config_.vel_integrator_gain;
     if (axis_->motor_.config_.motor_type == Motor::MOTOR_TYPE_ACIM) {
@@ -301,6 +321,8 @@ bool Controller::update() {
         vel_integrator_gain /= effective_flux;
         // TODO: also scale the integral value which is also changing units.
         // (or again just do control in torque units)
+        // TODO: 也缩放同样改变单位的整数值。
+        //（或者再次以扭矩单位进行控制）
     }
 
     // Velocity control
@@ -309,6 +331,9 @@ bool Controller::update() {
     // Anti-cogging is enabled after calibration
     // We get the current position and apply a current feed-forward
     // ensuring that we handle negative encoder positions properly (-1 == motor->encoder.encoder_cpr - 1)
+    // 校准后启用抗齿槽效应
+    // 我们获取当前位置并应用当前前馈
+    // 确保我们正确处理负编码器位置（-1 == motor->encoder.encoder_cpr - 1）
     if (anticogging_valid_ && config_.anticogging.anticogging_enabled) {
         if (!anticogging_pos_estimate.has_value()) {
             set_error(ERROR_INVALID_ESTIMATE);
@@ -329,6 +354,7 @@ bool Controller::update() {
         torque += (vel_gain * gain_scheduling_multiplier) * v_err;
 
         // Velocity integral action before limiting
+        // 限速前的速度积分动作
         torque += vel_integrator_torque_;
     }
 
@@ -354,12 +380,14 @@ bool Controller::update() {
     }
 
     // Velocity integrator (behaviour dependent on limiting)
+    // 速度积分器（行为取决于限制）
     if (config_.control_mode < CONTROL_MODE_VELOCITY_CONTROL) {
         // reset integral if not in use
         vel_integrator_torque_ = 0.0f;
     } else {
         if (limited) {
             // TODO make decayfactor configurable
+            // TODO 使衰减因子可配置
             vel_integrator_torque_ *= 0.99f;
         } else {
             vel_integrator_torque_ += ((vel_integrator_gain * gain_scheduling_multiplier) * current_meas_period) * v_err;
@@ -382,6 +410,10 @@ bool Controller::update() {
     // If mechanical power is negative (braking) and measured power is positive, something is wrong
     // This indicates that the controller is trying to stop, but torque is being produced.
     // Usually caused by an incorrect encoder offset
+    // 衍生检查
+    // 如果机械功率为负（制动）而测得的功率为正，则有问题
+    // 这表明控制器正在尝试停止，但正在产生扭矩。
+    // 通常由不正确的编码器偏移引起
     if (mechanical_power_ < config_.spinout_mechanical_power_threshold && electrical_power_ > config_.spinout_electrical_power_threshold) {
         set_error(ERROR_SPINOUT_DETECTED);
         return false;
@@ -393,6 +425,10 @@ bool Controller::update() {
     // However if we make ERROR_INVALID_ESTIMATE sticky then it will be
     // confusing that a normal sequence of motor calibration + encoder
     // calibration would leave the controller in an error state.
+    // TODO：这与其他粘性错误不一致。
+    // 但是，如果我们使 ERROR_INVALID_ESTIMATE 具有粘性，那么它将是
+    // 混淆电机校准 + 编码器的正常顺序
+    // 校准会使控制器处于错误状态。
     error_ &= ~ERROR_INVALID_ESTIMATE;
     return true;
 }

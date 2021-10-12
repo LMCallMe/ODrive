@@ -56,6 +56,7 @@ Motor::Error FieldOrientedController::on_measurement(
         std::optional<float> vbus_voltage, std::optional<float2D> Ialpha_beta,
         uint32_t input_timestamp) {
     // Store the measurements for later processing.
+    // 存储测量值以供以后处理。
     i_timestamp_ = input_timestamp;
     vbus_voltage_measured_ = vbus_voltage;
     Ialpha_beta_measured_ = Ialpha_beta;
@@ -69,15 +70,19 @@ ODriveIntf::MotorIntf::Error FieldOrientedController::get_alpha_beta_output(
 
     if (!vbus_voltage_measured_.has_value() || !Ialpha_beta_measured_.has_value()) {
         // FOC didn't receive a current measurement yet.
+        // FOC 尚未收到电流测量值。
         return Motor::ERROR_CONTROLLER_INITIALIZING;
     } else if (abs((int32_t)(i_timestamp_ - ctrl_timestamp_)) > MAX_CONTROL_LOOP_UPDATE_TO_CURRENT_UPDATE_DELTA) {
         // Data from control loop and current measurement are too far apart.
+        // 来自控制回路和电流测量的数据相距太远。
         return Motor::ERROR_BAD_TIMING;
     }
 
     // TODO: improve efficiency in case PWM updates are requested at a higher
     // rate than current sensor updates. In this case we can reuse mod_d and
     // mod_q from a previous iteration.
+    // TODO：在请求 PWM 更新的速率高于当前传感器更新的情况下提高效率。 
+    // 在这种情况下，我们可以重用前一次迭代中的 mod_d 和 mod_q。 
 
     if (!Vdq_setpoint_.has_value()) {
         return Motor::ERROR_UNKNOWN_VOLTAGE_COMMAND;
@@ -119,6 +124,7 @@ ODriveIntf::MotorIntf::Error FieldOrientedController::get_alpha_beta_output(
 
     if (enable_current_control_) {
         // Current control mode
+        // 电流控制模式
 
         if (!pi_gains_.has_value()) {
             return Motor::ERROR_UNKNOWN_GAINS;
@@ -136,16 +142,20 @@ ODriveIntf::MotorIntf::Error FieldOrientedController::get_alpha_beta_output(
         float Ierr_q = Iq_setpoint - Iq;
 
         // Apply PI control (V{d,q}_setpoint act as feed-forward terms in this mode)
+        // 应用 PI 控制（V{d,q}_setpoint 在此模式下充当前馈项）
         mod_d = V_to_mod * (Vd + v_current_control_integral_d_ + Ierr_d * p_gain);
         mod_q = V_to_mod * (Vq + v_current_control_integral_q_ + Ierr_q * p_gain);
 
         // Vector modulation saturation, lock integrator if saturated
+        // 矢量调制饱和，如果饱和则锁定积分器
         // TODO make maximum modulation configurable
+        // TODO 使最大调制可配置
         float mod_scalefactor = 0.80f * sqrt3_by_2 * 1.0f / std::sqrt(mod_d * mod_d + mod_q * mod_q);
         if (mod_scalefactor < 1.0f) {
             mod_d *= mod_scalefactor;
             mod_q *= mod_scalefactor;
             // TODO make decayfactor configurable
+            // TODO 使衰减因子可配置
             v_current_control_integral_d_ *= 0.99f;
             v_current_control_integral_q_ *= 0.99f;
         } else {
@@ -155,6 +165,7 @@ ODriveIntf::MotorIntf::Error FieldOrientedController::get_alpha_beta_output(
 
     } else {
         // Voltage control mode
+        // 电压控制模式
         mod_d = V_to_mod * Vd;
         mod_q = V_to_mod * Vq;
     }
@@ -167,6 +178,7 @@ ODriveIntf::MotorIntf::Error FieldOrientedController::get_alpha_beta_output(
     float mod_beta = c_p * mod_q + s_p * mod_d;
 
     // Report final applied voltage in stationary frame (for sensorless estimator)
+    // 报告固定框架中的最终施加的电压（用于无传感器估计器）
     final_v_alpha_ = mod_to_V * mod_alpha;
     final_v_beta_ = mod_to_V * mod_beta;
 
