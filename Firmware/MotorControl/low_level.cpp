@@ -29,7 +29,9 @@ const uint32_t stack_size_analog_thread = 1024;  // Bytes
 /* Global variables ----------------------------------------------------------*/
 
 // This value is updated by the DC-bus reading ADC.
+// 此值由 DC 总线读取 ADC 更新。
 // Arbitrary non-zero inital value to avoid division by zero if ADC reading is late
+// 任意非零初始值，以避免在 ADC 读取延迟时被零除
 float vbus_voltage = 12.0f;
 float ibus_ = 0.0f; // exposed for monitoring only
 bool brake_resistor_armed = false;
@@ -75,8 +77,37 @@ osThreadId analog_thread = 0;
 *     at a high rate.
 */
 
+/*
+* 本节包含对安全关键硬件寄存器的所有访问。
+* 具体来说，这些寄存器：
+* Motor0 PWM：
+* Timer1.MOE（启用主输出）
+* Timer1.CCR1（计数器比较寄存器1）
+* Timer1.CCR2（计数器比较寄存器2）
+* Timer1.CCR3（计数器比较寄存器3）
+* 电机 1 PWM：
+* Timer8.MOE（启用主输出）
+* Timer8.CCR1（计数器比较寄存器1）
+* Timer8.CCR2（计数器比较寄存器2）
+* Timer8.CCR3（计数器比较寄存器3）
+*制动电阻PWM：
+* Timer2.CCR3（计数器比较寄存器3）
+* Timer2.CCR4（计数器比较寄存器4）
+*
+* 作出以下假设：
+* - 硬件按照数据表 DM00031020 中的描述运行：
+* - 假设不存在由辐射引起的硬件错误。
+* - 启动后，本节使用的所有变量都由本节代码专门修改（不包括函数参数）
+* - 假设没有内存损坏。
+* - 此代码由符合 C 标准的编译器编译。
+*
+* 此外：
+* - 在调用 safety_critical_arm_motor_pwm 和 safety_critical_disarm_motor_pwm 之间，
+*   电机的Ibus 电流设置为正确值，并且以高速率调用update_brake_resistor。
+*/
 
 // @brief Arms the brake resistor
+// @brief 配置制动电阻器
 void safety_critical_arm_brake_resistor() {
     CRITICAL_SECTION() {
         for (size_t i = 0; i < AXIS_COUNT; ++i) {
@@ -94,6 +125,8 @@ void safety_critical_arm_brake_resistor() {
 // all motor PWM outputs.
 // After calling this, the brake resistor can only be armed again
 // by calling safety_critical_arm_brake_resistor().
+// @brief 解除制动电阻并通过扩展解除所有电机 PWM 输出。
+// 调用后，制动电阻只能通过调用 safety_critical_arm_brake_resistor() 再次启用。
 void safety_critical_disarm_brake_resistor() {
     bool brake_resistor_was_armed = brake_resistor_armed;
 
@@ -106,6 +139,7 @@ void safety_critical_disarm_brake_resistor() {
     }
 
     // Check necessary to prevent infinite recursion
+    // 必要的检查以防止无限递归
     if (brake_resistor_was_armed) {
         for (auto& axis: axes) {
             axis.motor_.disarm();
@@ -115,6 +149,7 @@ void safety_critical_disarm_brake_resistor() {
 
 // @brief Updates the brake resistor PWM timings unless
 // the brake resistor is disarmed.
+// @brief 更新制动电阻器 PWM 时序，除非制动电阻器被解除。
 void safety_critical_apply_brake_resistor_timings(uint32_t low_off, uint32_t high_on) {
     if (high_on - low_off < TIM_APB1_DEADTIME_CLOCKS) {
         odrv.disarm_with_error(ODrive::ERROR_BRAKE_DEADTIME_VIOLATION);
@@ -126,6 +161,8 @@ void safety_critical_apply_brake_resistor_timings(uint32_t low_off, uint32_t hig
             // Safe update of low and high side timings
             // To avoid race condition, first reset timings to safe state
             // ch3 is low side, ch4 is high side
+            // 安全更新低端和高端时序
+            // 为避免竞争条件，首先将时序重置为安全状态 ch3 为低侧，ch4 为高侧
             htim2.Instance->CCR3 = 0;
             htim2.Instance->CCR4 = TIM_APB1_PERIOD_CLOCKS + 1;
             htim2.Instance->CCR3 = low_off;
@@ -139,6 +176,7 @@ void safety_critical_apply_brake_resistor_timings(uint32_t low_off, uint32_t hig
 
 void start_adc_pwm() {
     // Disarm motors
+    // 电机去使能
     for (auto& axis: axes) {
         axis.motor_.disarm();
     }
@@ -151,6 +189,7 @@ void start_adc_pwm() {
         motor.timer_->Instance->CCR3 = half_load;
 
         // Enable PWM outputs (they are still masked by MOE though)
+        // 启用 PWM 输出（尽管它们仍然被 MOE 屏蔽）
         motor.timer_->Instance->CCER |= (TIM_CCx_ENABLE << TIM_CHANNEL_1);
         motor.timer_->Instance->CCER |= (TIM_CCxN_ENABLE << TIM_CHANNEL_1);
         motor.timer_->Instance->CCER |= (TIM_CCx_ENABLE << TIM_CHANNEL_2);
@@ -164,6 +203,7 @@ void start_adc_pwm() {
     __HAL_ADC_ENABLE(&hadc2);
     __HAL_ADC_ENABLE(&hadc3);
     // Warp field stabilize.
+    // 等待电磁场稳定。
     osDelay(2);
 
 
@@ -171,6 +211,7 @@ void start_adc_pwm() {
 
 
     // Start brake resistor PWM in floating output configuration
+    // 启动制动电阻PWM在浮动输出配置
 #if HW_VERSION_MAJOR == 3
     htim2.Instance->CCR3 = 0;
     htim2.Instance->CCR4 = TIM_APB1_PERIOD_CLOCKS + 1;
@@ -184,6 +225,7 @@ void start_adc_pwm() {
 }
 
 // @brief ADC1 measurements are written to this buffer by DMA
+// @brief ADC1 测量值由 DMA 写入此缓冲区
 uint16_t adc_measurements_[ADC_CHANNEL_COUNT] = { 0 };
 
 // @brief Starts the general purpose ADC on the ADC1 peripheral.
@@ -195,6 +237,14 @@ uint16_t adc_measurements_[ADC_CHANNEL_COUNT] = { 0 };
 //
 // The injected (high priority) channel of ADC1 is used to sample vbus_voltage.
 // This conversion is triggered by TIM1 at the frequency of the motor control loop.
+// @brief 在 ADC1 外设上启动通用 ADC。
+// 可以使用 get_adc_voltage() 读取测量的 ADC 电压。
+//
+// ADC1 设置为以循环方式连续采样所有通道 0 到 15。
+// DMA 用于将测量的 12 位值复制到 adc_measurements_。
+//
+// ADC1 的注入（高优先级）通道用于采样 vbus_电压。
+// 此转换由 TIM1 以电机控制回路的频率触发。
 void start_general_purpose_adc() {
     ADC_ChannelConfTypeDef sConfig;
 
@@ -247,6 +297,18 @@ void start_general_purpose_adc() {
 //  21000kHz / (15+26) / 16 = 32kHz
 // The true frequency is slightly lower because of the injected vbus
 // measurements
+// @brief 返回与指定引脚关联的 ADC 电压。
+// 这仅在 GPIO 自启动后未用于任何其他用途时才有效，否则必须先将其置于模拟模式。
+// 如果引脚没有关联的 ADC1 通道，则返回 -1.0f。
+//
+// 在 ODrive 3.3 和 3.4 上，以下引脚可用于此功能：
+// GPIO_1、GPIO_2、GPIO_3、GPIO_4 和一些连接到板载传感器的引脚（M0_TEMP、M1_TEMP、AUX_TEMP）
+//
+// ADC 值在后台以 ~30kHz 采样，无需任何 CPU 参与。
+//
+// 详情：16次转换中的每一次都需要（15+26）个ADC时钟周期和ADC，所以整个序列的更新速率为：
+// 21000kHz / (15+26) / 16 = 32kHz
+// 由于注入的 vbus 测量值，真实频率略低 
 float get_adc_voltage(Stm32Gpio gpio) {
     return get_adc_relative_voltage(gpio) * adc_ref_voltage;
 }
@@ -258,6 +320,8 @@ float get_adc_relative_voltage(Stm32Gpio gpio) {
 
 // @brief Given a GPIO_port and pin return the associated adc_channel.
 // returns UINT16_MAX if there is no adc_channel;
+// @brief 给定 GPIO_port 和 pin 返回关联的 adc_channel。
+// 如果没有 adc_channel，则返回 UINT16_MAX；
 uint16_t channel_from_gpio(Stm32Gpio gpio) {
     uint32_t channel = UINT32_MAX;
     if (gpio.port_ == GPIOA) {
@@ -301,6 +365,8 @@ uint16_t channel_from_gpio(Stm32Gpio gpio) {
 
 // @brief Given an adc channel return the voltage as a ratio of adc_ref_voltage
 // returns -1.0f if the channel is not valid.
+// @brief 给定一个 adc 通道，将电压作为 adc_ref_voltage 的比率返回
+// 如果通道无效，则返回 -1.0f。
 float get_adc_relative_voltage_ch(uint16_t channel) {
     if (channel < ADC_CHANNEL_COUNT)
         return (float)adc_measurements_[channel] / adc_full_scale;
@@ -319,6 +385,7 @@ void vbus_sense_adc_cb(uint32_t adc_value) {
 
 // @brief Sums up the Ibus contribution of each motor and updates the
 // brake resistor PWM accordingly.
+// @brief 对每个电机的 Ibus 贡献求和并相应地更新制动电阻器 PWM。
 void update_brake_current() {
     float Ibus_sum = 0.0f;
     for (size_t i = 0; i < AXIS_COUNT; ++i) {
@@ -336,6 +403,7 @@ void update_brake_current() {
         }
     
         // Don't start braking until -Ibus > regen_current_allowed
+        // 在 -Ibus > regen_current_allowed 之前不要开始制动
         brake_current = -Ibus_sum - odrv.config_.max_regen_current;
         brake_duty = brake_current * odrv.config_.brake_resistance / vbus_voltage;
         
@@ -345,6 +413,7 @@ void update_brake_current() {
 
         if (is_nan(brake_duty)) {
             // Shuts off all motors AND brake resistor, sets error code on all motors.
+            // 关闭所有电机和制动电阻器，在所有电机上设置错误代码。
             odrv.disarm_with_error(ODrive::ERROR_BRAKE_DUTY_CYCLE_NAN);
             return;
         }
@@ -354,10 +423,12 @@ void update_brake_current() {
         }
 
         // Duty limit at 95% to allow bootstrap caps to charge
+        // 95% 的占空比允许自举电容充电
         brake_duty = std::clamp(brake_duty, 0.0f, 0.95f);
 
         // This cannot result in NaN (safe for race conditions) because we check
         // brake_resistance != 0 further up.
+        // 这不会导致 NaN（对于竞争条件是安全的），因为我们进一步检查了 brake_resistance != 0。
         brake_current = brake_duty * vbus_voltage / odrv.config_.brake_resistance;
         Ibus_sum += brake_duty * vbus_voltage / odrv.config_.brake_resistance;
     } else {
@@ -384,6 +455,7 @@ void update_brake_current() {
 
 
 /* Analog speed control input */
+/* 模拟速度控制输入 */
 
 static void update_analog_endpoint(const struct PWMMapping_t *map, int gpio)
 {

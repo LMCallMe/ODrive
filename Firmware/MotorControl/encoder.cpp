@@ -83,6 +83,8 @@ bool Encoder::do_checks(){
 // Triggered when an encoder passes over the "Index" pin
 // TODO: only arm index edge interrupt when we know encoder has powered up
 // (maybe by attaching the interrupt on start search, synergistic with following)
+// 当编码器越过“Index”引脚时触发
+// TODO：当我们知道编码器已通电时，仅臂索引边缘中断（可能通过在开始搜索时附加中断，与以下协同）
 void Encoder::enc_index_cb() {
     if (config_.use_index) {
         set_circular_count(0, false);
@@ -97,6 +99,8 @@ void Encoder::enc_index_cb() {
             // We can't use the update_offset facility in set_circular_count because
             // we also set the linear count before there is a chance to update. Therefore:
             // Invalidate offset calibration that may have happened before idx search
+            // 我们不能在 set_circular_count 中使用 update_offset 工具，
+            // 因为我们还在有机会更新之前设置了线性计数。 因此：使 idx 搜索之前可能发生的偏移校准无效
             is_ready_ = false;
         }
         index_found_ = true;
@@ -128,6 +132,7 @@ void Encoder::update_pll_gains() {
 
 void Encoder::check_pre_calibrated() {
     // TODO: restoring config from python backup is fragile here (ACIM motor type must be set first)
+    // TODO：从python备份恢复配置在这里很脆弱（必须先设置ACIM电机类型）
     if (axis_->motor_.config_.motor_type != Motor::MOTOR_TYPE_ACIM) {
         if (!is_ready_)
             config_.pre_calibrated = false;
@@ -137,8 +142,10 @@ void Encoder::check_pre_calibrated() {
 }
 
 // Function that sets the current encoder count to a desired 32-bit value.
+// 将当前编码器计数设置为所需 32 位值的函数。
 void Encoder::set_linear_count(int32_t count) {
     // Disable interrupts to make a critical section to avoid race condition
+    // 禁用中断以制作临界区以避免竞争条件
     uint32_t prim = cpu_enter_critical();
 
     // Update states
@@ -154,8 +161,11 @@ void Encoder::set_linear_count(int32_t count) {
 
 // Function that sets the CPR circular tracking encoder count to a desired 32-bit value.
 // Note that this will get mod'ed down to [0, cpr)
+// 将 CPR 循环跟踪编码器计数设置为所需的 32 位值的函数。
+// 请注意，这将被修改为 [0, cpr)
 void Encoder::set_circular_count(int32_t count, bool update_offset) {
     // Disable interrupts to make a critical section to avoid race condition
+    // 禁用中断以制作临界区以避免竞争条件
     uint32_t prim = cpu_enter_critical();
 
     if (update_offset) {
@@ -243,6 +253,10 @@ bool Encoder::run_hall_polarity_calibration() {
         // Out of 8 possible states, 120 and 60 deg arrangements each miss 2 states.
         // ODrive assumes 120 deg separation - if a 60 deg setup is used, it can
         // be converted to 120 deg states by flipping the polarity of one sensor.
+        // 霍尔效应传感器可以布置在 60 或 120 电角度。
+        // 在 8 种可能的状态中，120 度和 60 度排列各会错过 2 个状态。
+        // ODrive 假设间隔为 120 度 - 如果使用 60 度设置，
+        // 则可以通过翻转一个传感器的极性将其转换为 120 度状态。
         uint8_t states = state_seen.to_ulong();
         uint8_t hall_polarity = 0;
         auto flip_detect = [](uint8_t states, unsigned int idx)->bool {
@@ -285,6 +299,9 @@ bool Encoder::run_hall_phase_calibration() {
     // We should evaluate making thread execution synchronous with the control loops
     // at least optionally.
     // Perhaps the new loop_sync feature will give a loose timing guarantee that may be sufficient
+    // TODO：在 Encoder::update 中执行时存在竞争条件。
+    // 我们应该至少可选地评估使线程执行与控制循环同步。
+    // 也许新的 loop_sync 特性会提供一个松散的时间保证，这可能就足够了
     calibrate_hall_phase_ = true;
     config_.hall_edge_phcnt.fill(0.0f);
     hall_phase_calib_seen_count_.fill(0);
@@ -294,12 +311,14 @@ bool Encoder::run_hall_phase_calibration() {
 
     if (success) {
         // Check deltas to dicern rotation direction
+        // 检查增量以识别旋转方向
         float delta_phase = 0.0f;
         for (int i = 0; i < 6; i++) {
             int next_i = (i == 5) ? 0 : i+1;
             delta_phase += wrap_pm_pi(config_.hall_edge_phcnt[next_i] - config_.hall_edge_phcnt[i]);
         }
         // Correct reverse rotation
+        // 正确的反向旋转
         if (delta_phase < 0.0f) {
             config_.direction = -1;
             for (int i = 0; i < 6; i++)
@@ -308,6 +327,7 @@ bool Encoder::run_hall_phase_calibration() {
             config_.direction = 1;
         }
         // Normalize edge timing to 1st edge in sequence, and change units to counts
+        // 将边沿时序按顺序归一化为第一个边沿，并将单位更改为计数
         float offset = config_.hall_edge_phcnt[0];
         for (int i = 0; i < 6; i++) {
             float& phcnt = config_.hall_edge_phcnt[i];
@@ -324,6 +344,8 @@ bool Encoder::run_hall_phase_calibration() {
 // @brief Turns the motor in one direction for a bit and then in the other
 // direction in order to find the offset between the electrical phase 0
 // and the encoder state 0.
+// @brief 将电机朝一个方向转动一点，然后朝另一个方向转动，
+// 以便找到电气相位 0 和编码器状态 0 之间的偏移。
 bool Encoder::run_offset_calibration() {
     const float start_lock_duration = 1.0f;
 
@@ -340,6 +362,8 @@ bool Encoder::run_offset_calibration() {
 
     // We use shadow_count_ to do the calibration, but the offset is used by count_in_cpr_
     // Therefore we have to sync them for calibration
+    // 我们使用shadow_count_来做校准，但是count_in_cpr_使用了偏移量
+    // 因此我们必须同步它们以进行校准
     shadow_count_ = count_in_cpr_;
 
     CRITICAL_SECTION() {
@@ -375,6 +399,7 @@ bool Encoder::run_offset_calibration() {
     axis_->motor_.arm(&axis_->motor_.current_control_);
 
     // go to start position of forward scan for start_lock_duration to get ready to scan
+    // 转到前向扫描的起始位置 start_lock_duration 准备扫描
     for (size_t i = 0; i < (size_t)(start_lock_duration * 1000.0f); ++i) {
         if (!axis_->motor_.is_armed_) {
             return false; // TODO: return "disarmed" error code
@@ -455,7 +480,7 @@ bool Encoder::run_offset_calibration() {
 
     config_.phase_offset = encvaluesum / num_steps;
     int32_t residual = encvaluesum - ((int64_t)config_.phase_offset * (int64_t)num_steps);
-    config_.phase_offset_float = (float)residual / (float)num_steps + 0.5f;  // add 0.5 to center-align state to phase
+    config_.phase_offset_float = (float)residual / (float)num_steps + 0.5f;  // add 0.5 to center-align state to phase 添加 0.5 到中心对齐状态到相位
 
     is_ready_ = true;
     return true;
@@ -481,6 +506,7 @@ void Encoder::sample_now() {
 
         case MODE_HALL: {
             // do nothing: samples already captured in general GPIO capture
+            // do nothing：采样已经在通用 GPIO 捕获中捕获
         } break;
 
         case MODE_SINCOS: {
@@ -504,6 +530,7 @@ void Encoder::sample_now() {
     }
 
     // Sample all GPIO digital input data registers, used for HALL sensors for example.
+    // 采样所有 GPIO 数字输入数据寄存器，例如用于霍尔传感器。
     for (size_t i = 0; i < sizeof(ports_to_sample) / sizeof(ports_to_sample[0]); ++i) {
         port_samples_[i] = ports_to_sample[i]->IDR;
     }
@@ -569,6 +596,7 @@ void Encoder::abs_spi_cb(bool success) {
         case MODE_SPI_ABS_AMS: {
             uint16_t rawVal = abs_spi_dma_rx_[0];
             // check if parity is correct (even) and error flag clear
+            // 检查奇偶校验是否正确（偶数）并清除错误标志
             if (ams_parity(rawVal) || ((rawVal >> 14) & 1)) {
                 goto done;
             }
@@ -578,6 +606,7 @@ void Encoder::abs_spi_cb(bool success) {
         case MODE_SPI_ABS_CUI: {
             uint16_t rawVal = abs_spi_dma_rx_[0];
             // check if parity is correct
+            // 检查奇偶校验是否正确
             if (cui_parity(rawVal)) {
                 goto done;
             }
@@ -626,6 +655,7 @@ void Encoder::abs_spi_cs_pin_init(){
 }
 
 // Note that this may return counts +1 or -1 without any wrapping
+// 请注意，这可能会在没有任何包装的情况下返回计数 +1 或 -1
 int32_t Encoder::hall_model(float internal_pos) {
     int32_t base_cnt = (int32_t)std::floor(internal_pos);
 
@@ -649,6 +679,7 @@ int32_t Encoder::hall_model(float internal_pos) {
 
 bool Encoder::update() {
     // update internal encoder state.
+    // 更新内部编码器状态。
     int32_t delta_enc = 0;
     int32_t pos_abs_latched = pos_abs_; //LATCH
 
@@ -656,6 +687,7 @@ bool Encoder::update() {
         case MODE_INCREMENTAL: {
             //TODO: use count_in_cpr_ instead as shadow_count_ can overflow
             //or use 64 bit
+            //TODO: 使用 count_in_cpr_ 代替 shadow_count_ 可能溢出或使用 64 位
             int16_t delta_enc_16 = (int16_t)tim_cnt_sample_ - (int16_t)shadow_count_;
             delta_enc = (int32_t)delta_enc_16; //sign extend
         } break;
@@ -686,12 +718,14 @@ bool Encoder::update() {
                             if (maybe_phase) {
                                 float phase = maybe_phase.value();
                                 // Early increment to get the right divisor in recursive average
+                                // 在递归平均中获得正确除数的早期增量
                                 hall_phase_calib_seen_count_[edge_idx]++;
                                 float& edge_phase = config_.hall_edge_phcnt[edge_idx];
                                 if (hall_phase_calib_seen_count_[edge_idx] == 1)
                                     edge_phase = phase;
                                 else {
                                     // circularly wrapped recursive average
+                                    // 循环包装递归平均
                                     edge_phase += (phase - edge_phase) / hall_phase_calib_seen_count_[edge_idx];
                                     edge_phase = wrap_pm_pi(edge_phase);
                                 }
@@ -779,7 +813,7 @@ bool Encoder::update() {
         else
             return (int32_t)std::floor(internal_pos);
     };
-    // discrete phase detector
+    // discrete phase detector 
     float delta_pos_counts = (float)(shadow_count_ - encoder_model(pos_estimate_counts_));
     float delta_pos_cpr_counts = (float)(count_in_cpr_ - encoder_model(pos_cpr_counts_));
     delta_pos_cpr_counts = wrap_pm(delta_pos_cpr_counts, (float)(config_.cpr));
@@ -802,6 +836,8 @@ bool Encoder::update() {
     // TODO: we should strictly require that this value is from the previous iteration
     // to avoid spinout scenarios. However that requires a proper way to reset
     // the encoder from error states.
+    // TODO：我们应该严格要求这个值来自前一次迭代，以避免出现衍生场景。
+    // 然而，这需要一种正确的方法来从错误状态重置编码器。
     float pos_circular = pos_circular_.any().value_or(0.0f);
     pos_circular +=  wrap_pm((pos_cpr_counts_ - pos_cpr_counts_last) / (float)config_.cpr, 1.0f);
     pos_circular = fmodf_pos(pos_circular, axis_->controller_.config_.circular_setpoint_range);
@@ -814,6 +850,7 @@ bool Encoder::update() {
         interpolation_ = 0.5f;
     // reset interpolation if encoder edge comes
     // TODO: This isn't correct. At high velocities the first phase in this count may very well not be at the edge.
+    // TODO: 这不正确。 在高速下，此计数中的第一阶段很可能不在边缘。
     } else if (delta_enc > 0) {
         interpolation_ = 0.0f;
     } else if (delta_enc < 0) {
