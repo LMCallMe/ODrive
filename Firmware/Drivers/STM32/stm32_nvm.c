@@ -30,6 +30,28 @@
 * fields as "valid" (in the direction of increasing address).
 */
 
+/*
+* 基于闪存的非易失性存储器 (NVM)
+*
+* 该文件支持基于STM32内置闪存的持久化配置的存储和加载。
+*
+* STM32F405xx 有 12 个不同大小的闪存扇区。我们将最后两个扇区用于配置数据。这些页面每个都有 128kB 的大小。
+* 始终可以将这些扇区中的任何位设置为 0，但将它们设置为 1 需要擦除整个扇区。
+*
+* 我们将每个扇区视为一个 64 位字段数组，除了前 N 个字节，我们将其用作分配块。
+* 分配块是一个紧凑的位字段（每个条目 2 位），用于跟踪每个字段的状态（erased, invalid, valid）。
+*
+* 一个扇区始终被视为有效（read）扇区，另一个扇区是下一次写入访问的目标：它们可以被视为乒乓或双缓冲。
+*
+* 当写入一个数据块时，不是总是擦除整个可写扇区，而是将新数据附加到擦除区域中。这可能会增加闪存寿命。
+* 只有在没有足够空间容纳新数据时，才会擦除可写扇区。
+*
+* 在启动时，如果恰好有一个扇区的最后一个未擦除值具有“valid”状态，则该扇区被视为有效扇区。
+* 在任何其他情况下，选择是未定义的。
+*
+* 为了原子地写入一个新的数据块，我们首先将所有关联的字段标记为“invalid”（在分配表中），
+* 然后写入数据，然后将字段标记为“valid”（在增加地址的方向）。
+*/
 #include "stm32_nvm.h"
 
 #include <string.h>
@@ -128,6 +150,10 @@ static void HAL_FLASH_ClearError() {
 // @brief Erases a flash sector. This sets all bits in the sector to 1.
 // The sector's current index is reset to the minimum value (n_reserved).
 // @returns 0 on success or a non-zero error code otherwise
+
+// @brief 擦除闪存扇区。 这会将扇区中的所有位设置为 1。
+// 扇区的当前索引被重置为最小值（n_reserved）。
+// @returns 0 成功或非零错误代码否则
 int erase(sector_t *sector) {
     FLASH_EraseInitTypeDef erase_struct = {
         .TypeErase = FLASH_TYPEERASE_SECTORS,
@@ -158,6 +184,11 @@ fail:
 // The write operation goes in the direction of increasing indices.
 // @param state: 11: erased, 10: writing, 00: valid data
 // @returns 0 on success or a non-zero error code otherwise
+
+// @brief 将状态写入分配表。
+// 写操作朝着索引递增的方向进行。
+// @param state: 11: erased, 10: writing, 00: valid data
+// @returns 0 成功或非零错误代码
 int set_allocation_state(sector_t *sector, size_t index, size_t count, field_state_t state) {
     if (index < sector->n_reserved)
         return -1;
@@ -205,6 +236,15 @@ fail:
 //               Set to ref_state if all encountered states are equal to ref_state.
 // @returns The smallest index that points to a field with ref_state.
 //          This value is at least sector->n_reserved and at most max_index.
+
+// @brief 从后面读取分配表以确定有多少字段匹配引用状态。
+// @param sector: 执行搜索的扇区
+// @param max_index: 应该考虑的最大索引
+// @param ref_state: 参考状态
+// @param state: 设置为第一个遇到的不等于 ref_state 的状态。
+// 如果所有遇到的状态都等于 ref_state，则设置为 ref_state。
+// @returns 指向具有 ref_state 的字段的最小索引。
+// 这个值至少是sector->n_reserved，至多是max_index。
 size_t scan_allocation_table(sector_t *sector, size_t max_index, field_state_t ref_state, field_state_t *state) {
     const uint8_t ref_states = (ref_state << 0) | (ref_state << 2) | (ref_state << 4) | (ref_state << 6);
     size_t index = (((max_index + 3) >> 2) << 2); // start at the max index but round up to a multiple of 4
@@ -239,8 +279,13 @@ size_t scan_allocation_table(sector_t *sector, size_t max_index, field_state_t r
 // If this function fails subsequent calls to NVM functions (other than NVM_init or NVM_erase)
 // cause undefined behavior.
 // @returns 0 on success or a non-zero error code otherwise
+
+// 加载 NVM 数据的头部。
+// 如果此函数在后续调用 NVM 函数（除 NVM_init 或 NVM_erase 之外）失败，则会导致未定义的行为。
+// @returns 0 成功或非零错误代码
 int NVM_init(void) {
     field_state_t sector0_state, sector1_state;
+    // 全扇区反向扫描未被 ERASED 的第一个 block 的 index 和它的状态 state
     sectors[0].index = scan_allocation_table(&sectors[0], sectors[0].n_data,
                 ERASED, &sector0_state);
     sectors[1].index = scan_allocation_table(&sectors[1], sectors[1].n_data,
@@ -250,13 +295,16 @@ int NVM_init(void) {
     // Select valid sector on a best effort basis
     // (in unfortunate cases valid_sector might actually point
     // to an invalid or erased sector)
-    read_sector_ = 0;
-    if (sector1_state == VALID)
+    // 尽最大努力选择有效扇区（在不幸的情况下，valid_sector 实际上可能指向无效或已擦除的扇区）
+    read_sector_ = 0; // 默认从 sector0 读取
+    if (sector1_state == VALID) // 如果 sector1 的最新状态是 VALID 有效的就从 sector1 读
         read_sector_ = 1;
     
     // count the number of valid fields
+    // 统计有效域的 block 数量
     sector_t *read_sector = &sectors[read_sector_];
     uint8_t first_nonvalid_state;
+    // 从当前 index 反向(减小的方向)查找第一个不是 VALID 的 block 索引
     size_t min_valid_index = scan_allocation_table(read_sector, read_sector->index,
         VALID, &first_nonvalid_state);
     n_valid_ = read_sector->index - min_valid_index;
@@ -281,9 +329,16 @@ int NVM_init(void) {
 // Caution: this function may take a long time (like 1 second)
 //
 // @returns 0 on success or a non-zero error code otherwise
+
+// @brief 擦除 NVM 中的所有数据。
+//
+// 如果此函数在后续调用 NVM 函数（除 NVM_init 或 NVM_erase 之外）失败，则会导致未定义的行为。
+// 注意：这个函数可能需要很长时间（比如 1 秒）
+//
+// @returns 0 成功或非零错误代码否则
 int NVM_erase(void) {
     read_sector_ = 0;
-    sectors[0].index = sectors[0].n_reserved;
+    sectors[0].index = sectors[0].n_reserved; // 索引指向保留域
     sectors[1].index = sectors[1].n_reserved;
 
     int state = 0;
@@ -294,15 +349,21 @@ int NVM_erase(void) {
 
 // @brief Returns the maximum number of bytes that can be read using NVM_read.
 // This holds until NVM_commit is called.
+
+// @brief 返回可以使用 NVM_read 读取的最大字节数。
+// 这一直保持到 NVM_commit 被调用。
 size_t NVM_get_max_read_length(void) {
-    return n_valid_ << 3;
+    return n_valid_ << 3; // 每个可用的 block 是 64-bit 的数据，所以 n_valid_ * 8 就是剩余字节数
 }
 
 // @brief Returns the maximum length (in bytes) that can passed to NVM_start_write.
 // This holds until NVM_commit is called.
+
+// @brief 返回可以传递给 NVM_start_write 的最大长度（以字节为单位）。
+// 这一直保持到 NVM_commit 被调用。 
 size_t NVM_get_max_write_length(void) {
-    sector_t *target = &sectors[1 - read_sector_];
-    return (target->n_data - target->n_reserved) << 3;
+    sector_t *target = &sectors[1 - read_sector_]; // 向另一个 sector 写
+    return (target->n_data - target->n_reserved) << 3; // 最多写满数据域
 }
 
 // @brief Reads from the latest committed block in the non-volatile memory.
@@ -311,9 +372,16 @@ size_t NVM_get_max_write_length(void) {
 // @param data: buffer to write to
 // @param length: length in bytes (if (offset + length) is out of range, the function fails)
 // @returns 0 on success or a non-zero error code otherwise
+
+// @brief 从非易失性存储器中最新提交的块中读取。
+// 该函数要么成功，要么不修改提供的缓冲区。
+// @param offset: 以字节为单位的偏移量（0 表示有效区域的开始）
+// @param data: 要写入的缓冲区
+// @param length: 以字节为单位的长度（如果（偏移量 + 长度）超出范围，则函数失败）
+// @returns 0 成功或非零错误代码否则
 int NVM_read(size_t offset, uint8_t *data, size_t length) {
-    if (offset + length > (n_valid_ << 3))
-        return -1;
+    if (offset + length > (n_valid_ << 3)) 
+        return -1; // 超出索引区间
     sector_t *read_sector = &sectors[read_sector_];
     const uint8_t *src_ptr = ((const uint8_t *)&read_sector->data[read_sector->index - n_valid_]) + offset;
     memcpy(data, src_ptr, length);
@@ -326,20 +394,28 @@ int NVM_read(size_t offset, uint8_t *data, size_t length) {
 // The length must be at most equal to the size indicated by NVM_get_max_write_length().
 //
 // @param length: Length of the staging block that should be created
+
+// @brief 开始一个原子写操作。
+//
+// 在调用 NVM_commit 之前，不会修改或使最近的有效 NVM 数据无效。
+// 长度必须最多等于 NVM_get_max_write_length() 指示的大小，即最多写满。
+//
+// @param length: 应创建的暂存块的长度
 int NVM_start_write(size_t length) {
     int status = 0;
     sector_t *target = &sectors[1 - read_sector_];
 
-    length = (length + 7) >> 3; // round to multiple of 64 bit
+    length = (length + 7) >> 3; // round to multiple of 64 bit 对齐
     if (length > target->n_data - target->n_reserved)
-        return -1;
+        return -1; // 写入数据超限
 
-    // make room for the new data
+    // make room for the new data 现存 ERASED 区域不够则擦除整个扇区
     if (length > target->n_data - target->index)
         if ((status = erase(target)))
             return status;
 
     // invalidate the fields we're about to write
+    // 现存 ERASED 区域足够则将要写入的区域标记为 INVALID
     status = set_allocation_state(target, target->index, length, INVALID);
     if (status)
         return status;
@@ -358,6 +434,16 @@ int NVM_start_write(size_t length) {
 // @param offset: The offset in bytes, 0 being the beginning of the staging block.
 // @param data: Pointer to the data that should be written
 // @param length: Data length in bytes
+
+// @brief 写入使用 NVM_start_write 打开的当前数据块。
+//
+// 如果 (offset + length) 大于传递给 NVM_start_write 的长度，则操作失败。
+// 在调用 NVM_commit 之前，不会修改或使最近的有效 NVM 数据无效。
+// 警告：在单个事务期间多次将不同的数据写入同一区域会导致数据损坏。
+//
+// @param offset：以字节为单位的偏移量，0 是暂存块的开始。
+// @param data: 指向应写入数据的指针
+// @param length: 以字节为单位的数据长度
 int NVM_write(size_t offset, uint8_t *data, size_t length) {
     if (offset + length > (n_staging_area_ << 3))
         return -1;

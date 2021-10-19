@@ -76,6 +76,9 @@ void ODriveCAN::can_server_thread() {
 // Set one of only a few common baud rates.  CAN doesn't do arbitrary baud rates well due to the time-quanta issue.
 // 21 TQ allows for easy sampling at exactly 80% (recommended by Vector Informatik GmbH for high reliability systems)
 // Conveniently, the CAN peripheral's 42MHz clock lets us easily create 21TQs for all common baud rates
+// 设置几个常见的波特率之一。 由于 time-quanta 问题，CAN 不能很好地执行任意波特率。
+// 21 TQ 允许在 80% 的情况下轻松采样（Vector Informatik GmbH 推荐用于高可靠性系统）
+// 方便的是，CAN 外设的 42MHz 时钟让我们可以轻松地为所有常见的波特率创建 21TQ
 bool ODriveCAN::set_baud_rate(uint32_t baud_rate) {
     uint32_t prescaler = CAN_FREQ / baud_rate;
     if (prescaler * baud_rate == CAN_FREQ) {

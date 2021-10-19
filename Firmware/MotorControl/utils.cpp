@@ -7,6 +7,9 @@
 // as per the magnitude invariant clarke transform
 // The magnitude of the alpha-beta vector may not be larger than sqrt(3)/2
 // Returns true on success, and false if the input was out of range
+// 根据幅度不变克拉克变换计算上升沿时序 (0.0 - 1.0) 作为 alpha-beta 的函数
+// alpha-beta 向量的大小不能大于 sqrt(3)/2
+// 成功时返回真，如果输入超出范围则返回假
 std::tuple<float, float, float, bool> SVM(float alpha, float beta) {
     float tA, tB, tC;
     int Sextant;

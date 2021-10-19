@@ -18,6 +18,7 @@ osSemaphoreId sem_can;
 
 #if defined(STM32F405xx)
 // Place FreeRTOS heap in core coupled memory for better performance
+// 将 FreeRTOS heap 放到高速缓存以提高性能表现
 __attribute__((section(".ccmram")))
 #endif
 uint8_t ucHeap[configTOTAL_HEAP_SIZE];
@@ -177,6 +178,9 @@ bool ODrive::save_configuration(void) {
         // because the CPU gets halted during a flash erase. Missing events
         // (encoder updates, step/dir steps) is not good so to be sure we just
         // reboot.
+        // FIXME：在 save_configuration 期间，我们可能会错过一些中断，因为 CPU 在闪存擦除期间停止运行。
+        // 错过一些事件（编码器更新、步骤/目录步骤）并不是处于一个好的状态，
+        // 因此请确保我们只是重新启动。
         NVIC_SystemReset();
     }
 
@@ -191,6 +195,9 @@ void ODrive::erase_configuration(void) {
     // be to reset the values in RAM to default. However right now that's not
     // practical because several startup actions depend on the config. The
     // other problem is that the stack overflows if we reset to default here.
+    // FIXME：这次重启是一种解决方法，因为我们不希望下一个 save_configuration 将旧配置从 RAM 写回 NVM。
+    // 正确的操作是将 RAM 中的值重置为默认值。 但是现在这不切实际，因为几个启动操作取决于配置。 
+    // 另一个问题是，如果我们在这里重置为默认值，堆栈会溢出。
     NVIC_SystemReset();
 }
 
@@ -205,6 +212,8 @@ void ODrive::enter_dfu_mode() {
         * the brake resistor FETs on older boards.
         * If you really want to use it on an older board, add 3.3k pull-down resistors
         * to the AUX_L and AUX_H signals and _only then_ uncomment these lines.
+        * DFU 模式只允许在大于等于 3.5 的板上，因为它会烧毁旧板上的制动电阻 FET。
+        * 如果您真的想在较旧的板上使用它，请在 AUX_L 和 AUX_H 信号中添加 3.3k 下拉电阻，然后才取消注释这些行。
         */
         //__asm volatile ("CPSID I\n\t":::"memory"); // disable interrupts
         //_reboot_cookie = 0xDEADFE75;
@@ -338,6 +347,23 @@ void ODrive::disarm_with_error(Error error) {
  * Time consuming and undeterministic logic/arithmetic should live on
  * control_loop_cb() instead.
  */
+
+/**
+  * @brief 运行定期采样任务
+  *
+  * 需要对真实世界数据进行采样的所有组件都应在此函数中执行此操作，
+  * 因为它以高中断优先级运行并提供尽可能低的时序抖动。
+  *
+  * 从此函数调用的所有函数都应遵守以下规则：
+  * - 尝试在每次迭代中使用相同数量的 CPU 周期。
+  *（原因：在函数中稍后运行的任务仍然需要尽可能低的时序抖动）
+  * - 使用尽可能少的周期。
+  *（原因：中断阻塞了其他重要的中断（TODO：哪些？））
+  * - 不调用任何 FreeRTOS 函数。
+  *（原因：中断优先级高于系统调用的最大允许优先级）
+  *
+  * 耗时且不确定的逻辑/算法应该存在于 control_loop_cb() 上。
+  */
 void ODrive::sampling_cb() {
     n_evt_sampling_++;
 
@@ -361,11 +387,24 @@ void ODrive::sampling_cb() {
  *        potentially missed timer update interrupts. Therefore this counter
  *        must not rely on any interrupts.
  */
+
+/**
+  * @brief 运行周期性控制循环。
+  *
+  * 该函数在低优先级中断上下文中执行，允许调用 CMSIS 函数。
+  *
+  * 但它的运行优先级高于通信工作负载。
+  *
+  * @param update_cnt：更新事件的真实计数（环绕在 16 位）。
+  *        这用于面对可能错过的定时器更新中断时的时间戳计算。 
+  *        因此这个计数器不能依赖任何中断。
+  */
 void ODrive::control_loop_cb(uint32_t timestamp) {
     last_update_timestamp_ = timestamp;
     n_evt_control_loop_++;
 
     // TODO: use a configurable component list for most of the following things
+    // TODO：为以下大多数事情使用可配置的组件列表
 
     MEASURE_TIME(task_times_.control_loop_misc) {
         // Reset all output ports so that we are certain about the freshness of
@@ -374,6 +413,9 @@ void ODrive::control_loop_cb(uint32_t timestamp) {
         // this safety check doesn't work.
         // TODO: maybe we should add a check to output ports that prevents
         // double-setting the value.
+        // 重置所有输出端口，以便我们确定我们使用的所有值的新鲜度。
+        // 如果我们忘记在这里重置一个值，可能发生的最坏的情况是这个安全检查不起作用。
+        // TODO：也许我们应该对输出端口添加一个检查，以防止重复设置该值。
         for (auto& axis: axes) {
             axis.acim_estimator_.slip_vel_.reset();
             axis.acim_estimator_.stator_phase_vel_.reset();
@@ -403,6 +445,7 @@ void ODrive::control_loop_cb(uint32_t timestamp) {
     MEASURE_TIME(task_times_.control_loop_checks) {
         for (auto& axis: axes) {
             // look for errors at axis level and also all subcomponents
+            // 在 axis 级别以及所有子组件中查找错误
             bool checks_ok = axis.do_checks(timestamp);
 
             // make sure the watchdog is being fed. 
@@ -416,6 +459,7 @@ void ODrive::control_loop_cb(uint32_t timestamp) {
 
     for (auto& axis: axes) {
         // Sub-components should use set_error which will propegate to this error_
+        // 子组件应该使用 set_error 它将传播到这个 error_
         MEASURE_TIME(axis.task_times_.thermistor_update) {
             axis.motor_.fet_thermistor_.update();
             axis.motor_.motor_thermistor_.update();
@@ -427,6 +471,7 @@ void ODrive::control_loop_cb(uint32_t timestamp) {
 
     // Controller of either axis might use the encoder estimate of the other
     // axis so we process both encoders before we continue.
+    // 任一轴的控制器可能使用另一个轴的编码器估计，因此我们在继续之前处理两个编码器。
 
     for (auto& axis: axes) {
         MEASURE_TIME(axis.task_times_.sensorless_estimator_update)
@@ -462,6 +507,7 @@ void ODrive::control_loop_cb(uint32_t timestamp) {
 
 
 /** @brief For diagnostics only */
+/** @brief 仅用于诊断 */
 uint32_t ODrive::get_interrupt_status(int32_t irqn) {
     if ((irqn < -14) || (irqn >= 240)) {
         return 0xffffffff;
@@ -537,6 +583,8 @@ static void rtos_main(void*) {
     // Try to initialized gate drivers for fault-free startup.
     // If this does not succeed, a fault will be raised and the idle loop will
     // periodically attempt to reinit the gate driver.
+    // 尝试初始化栅极驱动器以实现无故障启动。
+    // 如果这不成功，则会引发故障并且空闲循环将定期尝试重新初始化栅极驱动器。
     for(auto& axis: axes){
         axis.motor_.setup();
     }
@@ -557,6 +605,8 @@ static void rtos_main(void*) {
     // startup. This delay gives the current sensor calibration time to
     // converge. If the DRV chip is unpowered, the motor will not become ready
     // but we still enter idle state.
+    // 最多等待 2 秒让电机准备就绪，以实现无错误启动。 该延迟使电流传感器校准时间收敛。 
+    // 如果 DRV 芯片未通电，电机将不会准备就绪，但我们仍会进入空闲状态。
     for (size_t i = 0; i < 2000; ++i) {
         bool motors_ready = std::all_of(axes.begin(), axes.end(), [](auto& axis) {
             return axis.motor_.current_meas_.has_value();
@@ -574,6 +624,8 @@ static void rtos_main(void*) {
     // Start state machine threads. Each thread will go through various calibration
     // procedures and then run the actual controller loops.
     // TODO: generalize for AXIS_COUNT != 2
+    // 启动状态机线程。 每个线程将经过各种校准程序，然后运行实际的控制器循环。
+    // TODO: 概括为 AXIS_COUNT != 2
     for (size_t i = 0; i < AXIS_COUNT; ++i) {
         axes[i].start_thread();
     }
@@ -606,6 +658,15 @@ extern "C" void early_start_checks(void) {
         * This loop takes 5 cycles per iteration and at this point the system runs
         * on the internal 16MHz RC oscillator so the delay is about 2 seconds.
         */
+        /* STM DFU 引导加载程序启用 PB10 (AUX_H) 和 PB11 (AUX_L) 上的内部上拉电阻，
+        * 从而导致制动电阻 FET 上的直通并消除它们，除非存在外部 3.3k 下拉电阻。 
+        * 下拉仅在 ODrive 3.5 或更新版本上出现。 在较旧的主板上，我们默认禁用 DFU，
+        * 但如果用户坚持只剩下一件事可以节省它：时间。 制动电阻栅极驱动器需要一定的 
+        * 10V 电源 (GVDD) 才能工作。 该电压由在系统复位时禁用的电机栅极驱动器提供。 
+        * 因此，随着时间的推移，GVDD 电压_应该_低于危险水平。 这完全是随意的，不应依赖，
+        * 因此如果您忽略此警告，则只能依靠自己。 该循环每次迭代需要 5 个周期，
+        * 此时系统在内部 16MHz RC 振荡器上运行，因此延迟约为 2 秒。
+        */
         for (size_t i = 0; i < (16000000UL / 5UL * 2UL); ++i) {
             __NOP();
         }
@@ -615,6 +676,10 @@ extern "C" void early_start_checks(void) {
     /* We could jump to the bootloader directly on demand without rebooting
     but that requires us to reset several peripherals and interrupts for it
     to function correctly. Therefore it's easier to just reset the entire chip. */
+    /* 我们可以根据需要直接跳转到引导加载程序而无需重新启动，
+     * 但这需要我们重置几个外设和中断才能使其正常运行。 
+     * 因此，只需重置整个芯片就更容易了。 
+     */
     if(_reboot_cookie == 0xDEADBEEF) {
         _reboot_cookie = 0xCAFEFEED;  //Reset bootloader trigger
         __set_MSP((uintptr_t)&_estack);
@@ -626,6 +691,10 @@ extern "C" void early_start_checks(void) {
     /* The bootloader might fail to properly clean up after itself,
     so if we're not sure that the system is in a clean state we
     just reset it again */
+    /* 引导加载程序在其自身之后可能无法正确清理，
+     * 因此如果我们不确定系统是否处于干净状态，
+     * 我们只需再次重置它 
+     */
     if(_reboot_cookie != 42) {
         _reboot_cookie = 42;
         NVIC_SystemReset();
@@ -639,6 +708,8 @@ extern "C" int main(void) {
     // This procedure of building a USB serial number should be identical
     // to the way the STM's built-in USB bootloader does it. This means
     // that the device will have the same serial number in normal and DFU mode.
+    // 这个建立USB序列号的过程应该和STM内置的USB引导加载程序一样。
+    // 这意味着设备在正常和 DFU 模式下将具有相同的序列号。
     uint32_t uuid0 = *(uint32_t *)(UID_BASE + 0);
     uint32_t uuid1 = *(uint32_t *)(UID_BASE + 4);
     uint32_t uuid2 = *(uint32_t *)(UID_BASE + 8);
@@ -658,6 +729,8 @@ extern "C" int main(void) {
     // Load configuration from NVM. This needs to happen after system_init()
     // since the flash interface must be initialized and before board_init()
     // since board initialization can depend on the config.
+    // 从 NVM 加载配置。 这需要在 system_init() 之后发生，因为必须初始化 flash 接口，
+    // 并且在 board_init() 之前发生，因为板初始化可能取决于配置。
     size_t config_size = 0;
     bool success = config_manager.start_load()
             && config_read_all()
